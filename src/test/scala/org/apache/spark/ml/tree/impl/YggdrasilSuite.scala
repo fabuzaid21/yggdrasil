@@ -17,13 +17,13 @@
 
 package org.apache.spark.ml.tree.impl
 
-import org.apache.spark.ml.tree._
+import org.apache.spark.ml.tree.{ygg, _}
 import org.apache.spark.ml.tree.impl.Yggdrasil.{FeatureVector, PartitionInfo, YggdrasilMetadata}
 import org.apache.spark.mllib.linalg.Vectors
 import org.apache.spark.mllib.regression.LabeledPoint
 import org.apache.spark.mllib.tree.impurity._
 import org.apache.spark.mllib.tree.model.ImpurityStats
-import org.apache.spark.mllib.util.{SparkFunSuite, MLlibTestSparkContext}
+import org.apache.spark.mllib.util.{MLlibTestSparkContext, SparkFunSuite}
 import org.apache.spark.util.collection.BitSet
 
 import scala.util.Random
@@ -219,12 +219,12 @@ class YggdrasilSuite extends SparkFunSuite with MLlibTestSparkContext  {
     val col1 = FeatureVector.fromOriginal(featureIndex = 0, featureArity = 0,
       values = Array(0.8, 0.1, 0.1, 0.2, 0.3, 0.5, 0.6))
     val (split1, _) = YggdrasilClassification.chooseSplit(col1, labelsAsBytes, fromOffset, toOffset, fullImpurityAgg, metadata)
-    assert(split1.nonEmpty && split1.get.isInstanceOf[ContinuousSplit])
+    assert(split1.nonEmpty && split1.get.isInstanceOf[ygg.ContinuousSplit])
 
     val col2 = FeatureVector.fromOriginal(featureIndex = 1, featureArity = 3,
       values = Array(0.0, 0.0, 1.0, 1.0, 1.0, 2.0, 2.0))
     val (split2, _) = YggdrasilRegression.chooseSplit(col2, labels, fromOffset, toOffset, fullImpurityAgg, metadata)
-    assert(split2.nonEmpty && split2.get.isInstanceOf[CategoricalSplit])
+    assert(split2.nonEmpty && split2.get.isInstanceOf[ygg.CategoricalSplit])
   }
 
   test("chooseOrderedCategoricalSplit: basic case") {
@@ -246,7 +246,7 @@ class YggdrasilSuite extends SparkFunSuite with MLlibTestSparkContext  {
         YggdrasilClassification.chooseOrderedCategoricalSplit(featureIndex, values, values.indices.toArray,
           labels, 0, values.length, metadata, featureArity)
       split match {
-        case Some(s: CategoricalSplit) =>
+        case Some(s: ygg.CategoricalSplit) =>
           assert(s.featureIndex === featureIndex)
           assert(s.leftCategories === expectedLeftCategories)
           assert(s.rightCategories === expectedRightCategories)
@@ -307,7 +307,7 @@ class YggdrasilSuite extends SparkFunSuite with MLlibTestSparkContext  {
     val (split, _) = YggdrasilRegression.chooseUnorderedCategoricalSplit(featureIndex, values, values.indices.toArray,
       labels, 0, values.length, metadata, featureArity, allSplits)
     split match {
-      case Some(s: CategoricalSplit) =>
+      case Some(s: ygg.CategoricalSplit) =>
         assert(s.featureIndex === featureIndex)
         assert(s.leftCategories.toSet === Set(0.0, 2.0))
         assert(s.rightCategories.toSet === Set(1.0, 3.0))
@@ -351,7 +351,7 @@ class YggdrasilSuite extends SparkFunSuite with MLlibTestSparkContext  {
     val (split, stats) = YggdrasilRegression.chooseContinuousSplit(featureIndex, values,
       values.indices.toArray, labels, 0, values.length, fullImpurityAgg, metadata)
     split match {
-      case Some(s: ContinuousSplit) =>
+      case Some(s: ygg.ContinuousSplit) =>
         assert(s.featureIndex === featureIndex)
         assert(s.threshold === 0.2)
       case _ =>
@@ -399,7 +399,7 @@ class YggdrasilSuite extends SparkFunSuite with MLlibTestSparkContext  {
     val fromOffset = 0
     val toOffset = col.values.length
     val numRows = toOffset
-    val split = new ContinuousSplit(0, threshold = 0.5)
+    val split = new ygg.ContinuousSplit(0, threshold = 0.5)
     val bitv = Yggdrasil.bitVectorFromSplit(col, fromOffset, toOffset, split, numRows)
     assert(bitv.toArray.toSet === Set(3, 4))
   }
@@ -410,7 +410,7 @@ class YggdrasilSuite extends SparkFunSuite with MLlibTestSparkContext  {
       Array(4, 2, 0, 1, 3))
     def checkSplit(fromOffset: Int, toOffset: Int, threshold: Double,
       expectedRight: Set[Int]): Unit = {
-        val split = new ContinuousSplit(0, threshold)
+        val split = new ygg.ContinuousSplit(0, threshold)
         val numRows = col.values.length
         val bitv = Yggdrasil.bitVectorFromSplit(col, fromOffset, toOffset, split, numRows)
         assert(bitv.toArray.toSet === expectedRight)
@@ -439,7 +439,7 @@ class YggdrasilSuite extends SparkFunSuite with MLlibTestSparkContext  {
 
     val info = PartitionInfo(Array(col), Array(0, numRows), activeNodes, Array(fullImpurityAgg))
     val partitionInfos = sc.parallelize(Seq(info))
-    val bestSplit = new ContinuousSplit(0, threshold = 0.5)
+    val bestSplit = new ygg.ContinuousSplit(0, threshold = 0.5)
     val bitVector = Yggdrasil.aggregateBitVector(partitionInfos, Array(Some(bestSplit)), numRows)
     assert(bitVector.toArray.toSet === Set(3, 4))
   }
@@ -458,7 +458,7 @@ class YggdrasilSuite extends SparkFunSuite with MLlibTestSparkContext  {
 
     val info = PartitionInfo(Array(col), Array(0, numRows), activeNodes, Array(fullImpurityAgg))
     val partitionInfos = sc.parallelize(Seq(info))
-    val bestSplit = new ContinuousSplit(0, threshold = -2.0)
+    val bestSplit = new ygg.ContinuousSplit(0, threshold = -2.0)
     val bitVector = Yggdrasil.aggregateBitVector(partitionInfos, Array(Some(bestSplit)), numRows)
     assert(bitVector.toArray.toSet === Set(0, 1, 4, 5))
   }
@@ -475,15 +475,15 @@ class YggdrasilSuite extends SparkFunSuite with MLlibTestSparkContext  {
         a.valid == b.valid
     }
     // old periphery: 2 nodes
-    val left = LearningNode.emptyNode(id = 1)
-    val right = LearningNode.emptyNode(id = 2)
-    val oldPeriphery: Array[LearningNode] = Array(left, right)
+    val left = ygg.LearningNode.emptyNode(id = 1)
+    val right = ygg.LearningNode.emptyNode(id = 2)
+    val oldPeriphery: Array[ygg.LearningNode] = Array(left, right)
     // bestSplitsAndGains: Do not split left, but split right node.
     val lCalc = new EntropyCalculator(Array(8.0, 1.0))
     val lStats = new ImpurityStats(0.0, lCalc.calculate(),
       lCalc, lCalc, new EntropyCalculator(Array(0.0, 0.0)))
 
-    val rSplit = new ContinuousSplit(featureIndex = 1, threshold = 0.6)
+    val rSplit = new ygg.ContinuousSplit(featureIndex = 1, threshold = 0.6)
     val rCalc = new EntropyCalculator(Array(5.0, 7.0))
     val rRightChildCalc = new EntropyCalculator(Array(1.0, 5.0))
     val rLeftChildCalc = new EntropyCalculator(Array(
@@ -498,11 +498,11 @@ class YggdrasilSuite extends SparkFunSuite with MLlibTestSparkContext  {
     val rStats =
       new ImpurityStats(rGain, rCalc.calculate(), rCalc, rLeftChildCalc, rRightChildCalc)
 
-    val bestSplitsAndGains: Array[(Option[Split], ImpurityStats)] =
+    val bestSplitsAndGains: Array[(Option[ygg.Split], ImpurityStats)] =
       Array((None, lStats), (Some(rSplit), rStats))
 
     // Test A: Split right node
-    val newPeriphery1: Array[LearningNode] =
+    val newPeriphery1: Array[ygg.LearningNode] =
       Yggdrasil.computeActiveNodePeriphery(oldPeriphery, bestSplitsAndGains, minInfoGain = 0.0)
     // Expect 2 active nodes
     assert(newPeriphery1.length === 2)
@@ -521,7 +521,7 @@ class YggdrasilSuite extends SparkFunSuite with MLlibTestSparkContext  {
       newPeriphery1(1).stats.impurityCalculator.stats.sameElements(rRightChildCalc.stats))
 
     // Test B: Increase minInfoGain, so split nothing
-    val newPeriphery2: Array[LearningNode] =
+    val newPeriphery2: Array[ygg.LearningNode] =
       Yggdrasil.computeActiveNodePeriphery(oldPeriphery, bestSplitsAndGains, minInfoGain = 1000.0)
     assert(newPeriphery2.isEmpty)
   }

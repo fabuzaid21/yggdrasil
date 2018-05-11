@@ -20,21 +20,19 @@ package org.apache.spark.ml.tree.impl
 import org.apache.spark.Logging
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.ml.Predictor
+import org.apache.spark.ml.classification.DecisionTreeClassificationModel
 import org.apache.spark.ml.param.ParamMap
-import org.apache.spark.ml.tree._
+import org.apache.spark.ml.regression.DecisionTreeRegressionModel
 import org.apache.spark.ml.tree.impl.YggdrasilUtil._
-import org.apache.spark.ml.classification.{DecisionTreeClassifier, DecisionTreeClassificationModel}
-import org.apache.spark.ml.regression.{DecisionTreeRegressor, DecisionTreeRegressionModel}
-import org.apache.spark.ml.util.MetadataUtils
+import org.apache.spark.ml.tree.{ygg, Node => SparkNode, _}
+import org.apache.spark.ml.util.{Identifiable, MetadataUtils}
+import org.apache.spark.mllib.linalg.Vector
 import org.apache.spark.mllib.regression.LabeledPoint
-import org.apache.spark.mllib.tree.configuration.Strategy
+import org.apache.spark.mllib.tree.configuration.{Algo => OldAlgo, Strategy => OldStrategy}
 import org.apache.spark.mllib.tree.impl.DecisionTreeMetadata
 import org.apache.spark.mllib.tree.impurity._
-import org.apache.spark.mllib.linalg.Vector
-import org.apache.spark.mllib.tree.configuration.{Algo => OldAlgo, Strategy => OldStrategy}
-import org.apache.spark.mllib.tree.model.{Predict, ImpurityStats}
+import org.apache.spark.mllib.tree.model.{ImpurityStats, Predict}
 import org.apache.spark.rdd.RDD
-import org.apache.spark.ml.util.Identifiable
 import org.apache.spark.sql.DataFrame
 import org.apache.spark.util.collection.{BitSet, SortDataFormat, Sorter}
 import org.roaringbitmap.RoaringBitmap
@@ -71,7 +69,9 @@ final class YggdrasilClassifier(override val uid: String)
              input: RDD[LabeledPoint],
              transposedDataset: RDD[(Int, Array[Double])],
              categoricalFeatures: Map[Int, Int]): DecisionTreeClassificationModel = {
-    val strategy = getOldStrategy(categoricalFeatures)
+
+    val numClasses: Int = input.map(_.label).distinct().count().toInt
+    val strategy = getOldStrategy(categoricalFeatures, numClasses)
     val model = Yggdrasil.train(input, strategy, Some(transposedDataset), parentUID = Some(uid))
     model.asInstanceOf[DecisionTreeClassificationModel]
   }
@@ -79,15 +79,23 @@ final class YggdrasilClassifier(override val uid: String)
   override protected def train(dataset: DataFrame): DecisionTreeClassificationModel = {
     val categoricalFeatures: Map[Int, Int] =
       MetadataUtils.getCategoricalFeatures(dataset.schema($(featuresCol)))
+    val numClasses: Int = MetadataUtils.getNumClasses(dataset.schema($(labelCol))) match {
+      case Some(n: Int) => n
+      case None => throw new IllegalArgumentException("DecisionTreeClassifier was given input" +
+        s" with invalid label column ${$(labelCol)}, without the number of classes" +
+        " specified. See StringIndexer.")
+      // TODO: Automatically index labels: SPARK-7126
+    }
+
     val oldDataset: RDD[LabeledPoint] = extractLabeledPoints(dataset)
-    val strategy = getOldStrategy(categoricalFeatures)
+    val strategy = getOldStrategy(categoricalFeatures, numClasses)
     val model = Yggdrasil.train(oldDataset, strategy, colStoreInput = None, parentUID = Some(uid))
     model.asInstanceOf[DecisionTreeClassificationModel]
   }
 
   /** Create a Strategy instance to use with the old API. */
-  private[impl] def getOldStrategy(categoricalFeatures: Map[Int, Int]): OldStrategy = {
-    super.getOldStrategy(categoricalFeatures, numClasses = 0, OldAlgo.Classification, getOldImpurity,
+  private[impl] def getOldStrategy(categoricalFeatures: Map[Int, Int], numClasses: Int): OldStrategy = {
+    super.getOldStrategy(categoricalFeatures, numClasses, OldAlgo.Classification, getOldImpurity,
       subsamplingRate = 1.0)
   }
 }
@@ -190,7 +198,7 @@ private[ml] object Yggdrasil extends Logging {
           featureIndex -> findSplits(featureIndex, numCategories)
         }
       } else {
-        Map.empty[Int, Array[CategoricalSplit]]
+        Map.empty[Int, Array[ygg.CategoricalSplit]]
       }
     }
 
@@ -200,24 +208,24 @@ private[ml] object Yggdrasil extends Logging {
       */
     private def findSplits(
                             featureIndex: Int,
-                            featureArity: Int): Array[CategoricalSplit] = {
+                            featureArity: Int): Array[ygg.CategoricalSplit] = {
       // Unordered features
       // 2^(featureArity - 1) - 1 combinations
       val numSplits = (1 << (featureArity - 1)) - 1
-      val splits = new Array[CategoricalSplit](numSplits)
+      val splits = new Array[ygg.CategoricalSplit](numSplits)
 
       var splitIndex = 0
       while (splitIndex < numSplits) {
         val categories: List[Double] =
           RandomForest.extractMultiClassCategories(splitIndex + 1, featureArity)
         splits(splitIndex) =
-          new CategoricalSplit(featureIndex, categories.toArray, featureArity)
+          new ygg.CategoricalSplit(featureIndex, categories.toArray, featureArity)
         splitIndex += 1
       }
       splits
     }
 
-    def getUnorderedSplits(featureIndex: Int): Array[CategoricalSplit] = unorderedSplits(featureIndex)
+    def getUnorderedSplits(featureIndex: Int): Array[ygg.CategoricalSplit] = unorderedSplits(featureIndex)
 
     def isClassification: Boolean = numClasses >= 2
 
@@ -235,7 +243,7 @@ private[ml] object Yggdrasil extends Logging {
   }
 
   private[impl] object YggdrasilMetadata {
-    def fromStrategy(strategy: Strategy): YggdrasilMetadata = new YggdrasilMetadata(strategy.numClasses,
+    def fromStrategy(strategy: OldStrategy): YggdrasilMetadata = new YggdrasilMetadata(strategy.numClasses,
       strategy.maxBins, strategy.minInfoGain, strategy.impurity, strategy.categoricalFeaturesInfo)
   }
 
@@ -244,7 +252,7 @@ private[ml] object Yggdrasil extends Logging {
     */
   def train(
              input: RDD[LabeledPoint],
-             strategy: Strategy,
+             strategy: OldStrategy,
              colStoreInput: Option[RDD[(Int, Array[Double])]] = None,
              parentUID: Option[String] = None): DecisionTreeModel = {
     // TODO: Check validity of params
@@ -256,7 +264,7 @@ private[ml] object Yggdrasil extends Logging {
   }
 
   private[impl] def finalizeTree(
-                                  rootNode: Node,
+                                  rootNode: SparkNode,
                                   algo: OldAlgo.Algo,
                                   numClasses: Int,
                                   numFeatures: Int,
@@ -286,8 +294,8 @@ private[ml] object Yggdrasil extends Logging {
 
   private[impl] def trainImpl(
                                input: RDD[LabeledPoint],
-                               strategy: Strategy,
-                               colStoreInput: Option[RDD[(Int, Array[Double])]]): Node = {
+                               strategy: OldStrategy,
+                               colStoreInput: Option[RDD[(Int, Array[Double])]]): SparkNode = {
     val metadata = YggdrasilMetadata.fromStrategy(strategy)
 
     // The case with 1 node (depth = 0) is handled separately.
@@ -330,18 +338,18 @@ private[ml] object Yggdrasil extends Logging {
     *          If a node is split, then this method will update its fields.
     */
   private[impl] def computeActiveNodePeriphery(
-                                                oldPeriphery: Array[LearningNode],
-                                                bestSplitsAndGains: Array[(Option[Split], ImpurityStats)],
-                                                minInfoGain: Double): Array[LearningNode] = {
+                                                oldPeriphery: Array[ygg.LearningNode],
+                                                bestSplitsAndGains: Array[(Option[ygg.Split], ImpurityStats)],
+                                                minInfoGain: Double): Array[ygg.LearningNode] = {
     bestSplitsAndGains.zipWithIndex.flatMap {
       case ((split, stats), nodeIdx) =>
         val node = oldPeriphery(nodeIdx)
         if (split.nonEmpty && stats.gain > minInfoGain) {
           // TODO: remove node id
-          node.leftChild = Some(LearningNode(node.id * 2, isLeaf = false,
+          node.leftChild = Some(ygg.LearningNode(node.id * 2, isLeaf = false,
             new ImpurityStats(Double.NaN, stats.leftImpurity, stats.leftImpurityCalculator,
               null, null, true)))
-          node.rightChild = Some(LearningNode(node.id * 2 + 1, isLeaf = false,
+          node.rightChild = Some(ygg.LearningNode(node.id * 2 + 1, isLeaf = false,
             new ImpurityStats(Double.NaN, stats.rightImpurity, stats.rightImpurityCalculator,
               null, null, true)))
           node.split = split
@@ -368,19 +376,19 @@ private[ml] object Yggdrasil extends Logging {
     */
   private[impl] def aggregateBitVector(
                                         partitionInfos: RDD[PartitionInfo],
-                                        bestSplits: Array[Option[Split]],
+                                        bestSplits: Array[Option[ygg.Split]],
                                         numRows: Int): RoaringBitmap = {
-    val bestSplitsBc: Broadcast[Array[Option[Split]]] =
+    val bestSplitsBc: Broadcast[Array[Option[ygg.Split]]] =
       partitionInfos.sparkContext.broadcast(bestSplits)
     val workerBitSubvectors: RDD[RoaringBitmap] = partitionInfos.map {
       case PartitionInfo(columns: Array[FeatureVector], nodeOffsets: Array[Int],
       activeNodes: BitSet, fullImpurities: Array[ImpurityAggregatorSingle]) =>
-        val localBestSplits: Array[Option[Split]] = bestSplitsBc.value
+        val localBestSplits: Array[Option[ygg.Split]] = bestSplitsBc.value
         // localFeatureIndex[feature index] = index into PartitionInfo.columns
         val localFeatureIndex: Map[Int, Int] = columns.map(_.featureIndex).zipWithIndex.toMap
         val bitSetForNodes: Iterator[RoaringBitmap] = activeNodes.iterator
           .zip(localBestSplits.iterator).flatMap {
-          case (nodeIndexInLevel: Int, Some(split: Split)) =>
+          case (nodeIndexInLevel: Int, Some(split: ygg.Split)) =>
             if (localFeatureIndex.contains(split.featureIndex)) {
               // This partition has the column (feature) used for this split.
               val fromOffset = nodeOffsets(nodeIndexInLevel)
@@ -429,7 +437,7 @@ private[ml] object Yggdrasil extends Logging {
                                         col: FeatureVector,
                                         from: Int,
                                         to: Int,
-                                        split: Split,
+                                        split: ygg.Split,
                                         numRows: Int): RoaringBitmap = {
     val bitv = new RoaringBitmap()
     var i = from
@@ -963,7 +971,7 @@ private[ml] object Yggdrasil extends Logging {
   }
 
   /**
-    * A wrapper that holds a primitive key – borrowed from [[org.apache.spark.ml.recommendation.ALS.KeyWrapper]]
+    * A wrapper that holds a primitive key – borrowed from [[org.apache.spark.ml.recommendation.ALS]]
     */
   private class KeyWrapper extends Ordered[KeyWrapper] {
 

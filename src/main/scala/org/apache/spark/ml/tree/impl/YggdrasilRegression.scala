@@ -1,8 +1,8 @@
 package org.apache.spark.ml.tree.impl
 
 import org.apache.spark.broadcast.Broadcast
-import org.apache.spark.ml.tree._
-import org.apache.spark.ml.tree.impl.Yggdrasil.{YggdrasilMetadata, FeatureVector, PartitionInfo}
+import org.apache.spark.ml.tree.{ImpurityAggregatorSingle, ygg, Node => SparkNode}
+import org.apache.spark.ml.tree.impl.Yggdrasil.{FeatureVector, PartitionInfo, YggdrasilMetadata}
 import org.apache.spark.mllib.regression.LabeledPoint
 import org.apache.spark.mllib.tree.model.ImpurityStats
 import org.apache.spark.rdd.RDD
@@ -17,7 +17,7 @@ object YggdrasilRegression {
                  colStoreInit: RDD[(Int, Array[Double])],
                  metadata: YggdrasilMetadata,
                  numRows: Int,
-                 maxDepth: Int): Node = {
+                 maxDepth: Int): SparkNode = {
 
     val labels = new Array[Double](numRows)
     input.map(_.label).zipWithIndex().collect().foreach { case (label: Double, rowIndex: Long) =>
@@ -57,9 +57,9 @@ object YggdrasilRegression {
 
     // Initialize model.
     // Note: We do not use node indices.
-    val rootNode = LearningNode.emptyNode(1) // TODO: remove node id
+    val rootNode = ygg.LearningNode.emptyNode(1) // TODO: remove node id
     // Active nodes (still being split), updated each iteration
-    var activeNodePeriphery: Array[LearningNode] = Array(rootNode)
+    var activeNodePeriphery: Array[ygg.LearningNode] = Array(rootNode)
     var numNodeOffsets: Int = 2
 
     // Iteratively learn, one level of the tree at a time.
@@ -67,7 +67,7 @@ object YggdrasilRegression {
     var doneLearning = false
     while (currentLevel < maxDepth && !doneLearning) {
       // Compute best split for each active node.
-      val bestSplitsAndGains: Array[(Option[Split], ImpurityStats)] =
+      val bestSplitsAndGains: Array[(Option[ygg.Split], ImpurityStats)] =
         computeBestSplits(partitionInfos, labelsBc, metadata)
       /*
       // NOTE: The actual active nodes (activeNodePeriphery) may be a subset of the nodes under
@@ -93,7 +93,7 @@ object YggdrasilRegression {
       doneLearning = currentLevel + 1 >= maxDepth || estimatedRemainingActive == 0
 
       if (!doneLearning) {
-        val splits: Array[Option[Split]] = bestSplitsAndGains.map(_._1)
+        val splits: Array[Option[ygg.Split]] = bestSplitsAndGains.map(_._1)
 
         // Aggregate bit vector (1 bit/instance) indicating whether each instance goes left/right
         val aggBitVector: RoaringBitmap = Yggdrasil.aggregateBitVector(partitionInfos, splits, numRows)
@@ -117,7 +117,7 @@ object YggdrasilRegression {
     // Done with learning
     groupedColStore.unpersist()
     labelsBc.unpersist()
-    rootNode.toNode
+    rootNode.toSparkNode
   }
 
   /**
@@ -140,12 +140,12 @@ object YggdrasilRegression {
     // Each worker returns:
     //   for each active node, best split + info gain,
     //     where the best split is None if no useful split exists
-    val partBestSplitsAndGains: RDD[Array[(Option[Split], ImpurityStats)]] = partitionInfos.map {
+    val partBestSplitsAndGains: RDD[Array[(Option[ygg.Split], ImpurityStats)]] = partitionInfos.map {
       case PartitionInfo(columns: Array[FeatureVector], nodeOffsets: Array[Int],
       activeNodes: BitSet, fullImpurityAggs: Array[ImpurityAggregatorSingle]) =>
         val localLabels = labelsBc.value
         // Iterate over the active nodes in the current level.
-        val toReturn = new Array[(Option[Split], ImpurityStats)](activeNodes.cardinality())
+        val toReturn = new Array[(Option[ygg.Split], ImpurityStats)](activeNodes.cardinality())
         val iter: Iterator[Int] = activeNodes.iterator
         var i = 0
         while (iter.hasNext) {
@@ -189,10 +189,10 @@ object YggdrasilRegression {
                                  fromOffset: Int,
                                  toOffset: Int,
                                  fullImpurityAgg: ImpurityAggregatorSingle,
-                                 metadata: YggdrasilMetadata): (Option[Split], ImpurityStats) = {
+                                 metadata: YggdrasilMetadata): (Option[ygg.Split], ImpurityStats) = {
     if (col.isCategorical) {
       if (metadata.isUnorderedFeature(col.featureIndex)) {
-        val splits: Array[CategoricalSplit] = metadata.getUnorderedSplits(col.featureIndex)
+        val splits: Array[ygg.CategoricalSplit] = metadata.getUnorderedSplits(col.featureIndex)
         chooseUnorderedCategoricalSplit(col.featureIndex, col.values, col.indices, labels, fromOffset, toOffset,
           metadata, col.featureArity, splits)
       } else {
@@ -230,7 +230,7 @@ object YggdrasilRegression {
                                                    from: Int,
                                                    to: Int,
                                                    metadata: YggdrasilMetadata,
-                                                   featureArity: Int): (Option[Split], ImpurityStats) = {
+                                                   featureArity: Int): (Option[ygg.Split], ImpurityStats) = {
     // TODO: Support high-arity features by using a single array to hold the stats.
 
     // aggStats(category) = label statistics for category
@@ -332,7 +332,7 @@ object YggdrasilRegression {
     val categoriesForSplit =
       categoriesSortedByCentroid.slice(0, bestSplitIndex + 1).map(_.toDouble)
     val bestFeatureSplit =
-      new CategoricalSplit(featureIndex, categoriesForSplit.toArray, featureArity)
+      new ygg.CategoricalSplit(featureIndex, categoriesForSplit.toArray, featureArity)
     val fullImpurityAgg = leftImpurityAgg.deepCopy().add(rightImpurityAgg)
     val bestRightImpurityAgg = fullImpurityAgg.deepCopy().subtract(bestLeftImpurityAgg)
     val bestImpurityStats = new ImpurityStats(bestGain, fullImpurity, fullImpurityAgg.getCalculator,
@@ -367,7 +367,7 @@ object YggdrasilRegression {
                                                      to: Int,
                                                      metadata: YggdrasilMetadata,
                                                      featureArity: Int,
-                                                     splits: Array[CategoricalSplit]): (Option[Split], ImpurityStats) = {
+                                                     splits: Array[ygg.CategoricalSplit]): (Option[ygg.Split], ImpurityStats) = {
 
     // Label stats for each category
     val aggStats = Array.tabulate[ImpurityAggregatorSingle](featureArity)(
@@ -399,7 +399,7 @@ object YggdrasilRegression {
       //  only requires addition/removal of a single category and a single add/subtract to
       //  leftCount and rightCount.
       //  TODO: Use more efficient encoding such as gray codes
-      var bestSplit: Option[CategoricalSplit] = None
+      var bestSplit: Option[ygg.CategoricalSplit] = None
       val bestLeftImpurityAgg = leftImpurityAgg.deepCopy()
       var bestGain: Double = -1.0
       val fullCount: Double = to - from
@@ -426,7 +426,7 @@ object YggdrasilRegression {
 
       val bestFeatureSplit = bestSplit match {
         case Some(split) => Some(
-          new CategoricalSplit(featureIndex, split.leftCategories, featureArity))
+          new ygg.CategoricalSplit(featureIndex, split.leftCategories, featureArity))
         case None => None
 
       }
@@ -452,7 +452,7 @@ object YggdrasilRegression {
                                            from: Int,
                                            to: Int,
                                            fullImpurityAgg: ImpurityAggregatorSingle,
-                                           metadata: YggdrasilMetadata): (Option[Split], ImpurityStats) = {
+                                           metadata: YggdrasilMetadata): (Option[ygg.Split], ImpurityStats) = {
 
     val leftImpurityAgg = metadata.createImpurityAggregator()
     val rightImpurityAgg = fullImpurityAgg.deepCopy()
@@ -495,7 +495,7 @@ object YggdrasilRegression {
     val bestImpurityStats = new ImpurityStats(bestGain, fullImpurity, fullImpurityAgg.getCalculator,
       bestLeftImpurityAgg.getCalculator, bestRightImpurityAgg.getCalculator)
     val split = if (bestThreshold != Double.NegativeInfinity && bestThreshold != values.last) {
-      Some(new ContinuousSplit(featureIndex, bestThreshold))
+      Some(new ygg.ContinuousSplit(featureIndex, bestThreshold))
     } else {
       None
     }

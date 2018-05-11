@@ -15,13 +15,13 @@
  * limitations under the License.
  */
 
-package org.apache.spark.ml.tree
+package org.apache.spark.ml.tree.ygg
 
 import org.apache.spark.annotation.DeveloperApi
+import org.apache.spark.ml.tree.{InternalNode, LeafNode, Node => SparkNode}
 import org.apache.spark.mllib.linalg.Vector
 import org.apache.spark.mllib.tree.impurity.ImpurityCalculator
-import org.apache.spark.mllib.tree.model.{InformationGainStats => OldInformationGainStats,
-  Node => OldNode, Predict => OldPredict, ImpurityStats}
+import org.apache.spark.mllib.tree.model.{ImpurityStats, InformationGainStats => OldInformationGainStats, Node => OldNode, Predict => OldPredict}
 
 /**
  * :: DeveloperApi ::
@@ -85,7 +85,7 @@ private[ml] object Node {
   /**
    * Create a new Node from the old Node format, recursively creating child nodes as needed.
    */
-  def fromOld(oldNode: OldNode, categoricalFeatures: Map[Int, Int]): Node = {
+  def fromOld(oldNode: OldNode, categoricalFeatures: Map[Int, Int]): SparkNode = {
     if (oldNode.isLeaf) {
       // TODO: Once the implementation has been moved to this API, then include sufficient
       //       statistics here.
@@ -101,134 +101,6 @@ private[ml] object Node {
         gain = gain, leftChild = fromOld(oldNode.leftNode.get, categoricalFeatures),
         rightChild = fromOld(oldNode.rightNode.get, categoricalFeatures),
         split = Split.fromOld(oldNode.split.get, categoricalFeatures), impurityStats = null)
-    }
-  }
-}
-
-/**
- * :: DeveloperApi ::
- * Decision tree leaf node.
- * @param prediction  Prediction this node makes
- * @param impurity  Impurity measure at this node (for training data)
- */
-@DeveloperApi
-final class LeafNode private[ml] (
-    override val prediction: Double,
-    override val impurity: Double,
-    override private[ml] val impurityStats: ImpurityCalculator) extends Node {
-
-  override def toString: String =
-    s"LeafNode(prediction = $prediction, impurity = $impurity)"
-
-  override private[ml] def predictImpl(features: Vector): LeafNode = this
-
-  override private[tree] def numDescendants: Int = 0
-
-  override private[tree] def subtreeToString(indentFactor: Int = 0): String = {
-    val prefix: String = " " * indentFactor
-    prefix + s"Predict: $prediction\n"
-  }
-
-  override private[tree] def subtreeDepth: Int = 0
-
-  override private[ml] def toOld(id: Int): OldNode = {
-    new OldNode(id, new OldPredict(prediction, prob = impurityStats.prob(prediction)),
-      impurity, isLeaf = true, None, None, None, None)
-  }
-
-  override private[ml] def maxSplitFeatureIndex(): Int = -1
-}
-
-/**
- * :: DeveloperApi ::
- * Internal Decision Tree node.
- * @param prediction  Prediction this node would make if it were a leaf node
- * @param impurity  Impurity measure at this node (for training data)
- * @param gain Information gain value.
- *             Values < 0 indicate missing values; this quirk will be removed with future updates.
- * @param leftChild  Left-hand child node
- * @param rightChild  Right-hand child node
- * @param split  Information about the test used to split to the left or right child.
- */
-@DeveloperApi
-final class InternalNode private[ml] (
-    override val prediction: Double,
-    override val impurity: Double,
-    val gain: Double,
-    val leftChild: Node,
-    val rightChild: Node,
-    val split: Split,
-    override private[ml] val impurityStats: ImpurityCalculator) extends Node {
-
-  override def toString: String = {
-    s"InternalNode(prediction = $prediction, impurity = $impurity, split = $split)"
-  }
-
-  override private[ml] def predictImpl(features: Vector): LeafNode = {
-    if (split.shouldGoLeft(features)) {
-      leftChild.predictImpl(features)
-    } else {
-      rightChild.predictImpl(features)
-    }
-  }
-
-  override private[tree] def numDescendants: Int = {
-    2 + leftChild.numDescendants + rightChild.numDescendants
-  }
-
-  override private[tree] def subtreeToString(indentFactor: Int = 0): String = {
-    val prefix: String = " " * indentFactor
-    prefix + s"If (${InternalNode.splitToString(split, left = true)})\n" +
-      leftChild.subtreeToString(indentFactor + 1) +
-      prefix + s"Else (${InternalNode.splitToString(split, left = false)})\n" +
-      rightChild.subtreeToString(indentFactor + 1)
-  }
-
-  override private[tree] def subtreeDepth: Int = {
-    1 + math.max(leftChild.subtreeDepth, rightChild.subtreeDepth)
-  }
-
-  override private[ml] def toOld(id: Int): OldNode = {
-    assert(id.toLong * 2 < Int.MaxValue, "Decision Tree could not be converted from new to old API"
-      + " since the old API does not support deep trees.")
-    new OldNode(id, new OldPredict(prediction, prob = impurityStats.prob(prediction)), impurity,
-      isLeaf = false, Some(split.toOld), Some(leftChild.toOld(OldNode.leftChildIndex(id))),
-      Some(rightChild.toOld(OldNode.rightChildIndex(id))),
-      Some(new OldInformationGainStats(gain, impurity, leftChild.impurity, rightChild.impurity,
-        new OldPredict(leftChild.prediction, prob = 0.0),
-        new OldPredict(rightChild.prediction, prob = 0.0))))
-  }
-
-  override private[ml] def maxSplitFeatureIndex(): Int = {
-    math.max(split.featureIndex,
-      math.max(leftChild.maxSplitFeatureIndex(), rightChild.maxSplitFeatureIndex()))
-  }
-}
-
-private object InternalNode {
-
-  /**
-   * Helper method for [[Node.subtreeToString()]].
-   * @param split  Split to print
-   * @param left  Indicates whether this is the part of the split going to the left,
-   *              or that going to the right.
-   */
-  private def splitToString(split: Split, left: Boolean): String = {
-    val featureStr = s"feature ${split.featureIndex}"
-    split match {
-      case contSplit: ContinuousSplit =>
-        if (left) {
-          s"$featureStr <= ${contSplit.threshold}"
-        } else {
-          s"$featureStr > ${contSplit.threshold}"
-        }
-      case catSplit: CategoricalSplit =>
-        val categoriesStr = catSplit.leftCategories.mkString("{", ",", "}")
-        if (left) {
-          s"$featureStr in $categoriesStr"
-        } else {
-          s"$featureStr not in $categoriesStr"
-        }
     }
   }
 }
@@ -261,12 +133,12 @@ private[tree] class LearningNode(
   /**
    * Convert this [[LearningNode]] to a regular [[Node]], and recurse on any children.
    */
-  def toNode: Node = {
+  def toSparkNode: SparkNode = {
     if (leftChild.nonEmpty) {
       assert(rightChild.nonEmpty && split.nonEmpty && stats != null,
         "Unknown error during Decision Tree learning.  Could not convert LearningNode to Node.")
       new InternalNode(stats.impurityCalculator.predict, stats.impurity, stats.gain,
-        leftChild.get.toNode, rightChild.get.toNode, split.get, stats.impurityCalculator)
+        leftChild.get.toSparkNode, rightChild.get.toSparkNode, split.get.toSparkSplit, stats.impurityCalculator)
     } else {
       if (stats.valid) {
         new LeafNode(stats.impurityCalculator.predict, stats.impurity,

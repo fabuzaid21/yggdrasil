@@ -15,9 +15,10 @@
  * limitations under the License.
  */
 
-package org.apache.spark.ml.tree
+package org.apache.spark.ml.tree.ygg
 
 import org.apache.spark.annotation.DeveloperApi
+import org.apache.spark.ml.tree.{CategoricalSplit => SparkCategoricalSplit, ContinuousSplit => SparkContinuousSplit, Split => SparkSplit}
 import org.apache.spark.mllib.linalg.Vector
 import org.apache.spark.mllib.tree.configuration.{FeatureType => OldFeatureType}
 import org.apache.spark.mllib.tree.model.{Split => OldSplit}
@@ -30,6 +31,8 @@ import org.apache.spark.mllib.tree.model.{Split => OldSplit}
  */
 @DeveloperApi
 sealed trait Split extends Serializable {
+  /** convert to org.apache.ml.tree.Split **/
+  def toSparkSplit: SparkSplit
 
   /** Index of feature which this split tests */
   def featureIndex: Int
@@ -59,13 +62,13 @@ sealed trait Split extends Serializable {
 
 private[tree] object Split {
 
-  def fromOld(oldSplit: OldSplit, categoricalFeatures: Map[Int, Int]): Split = {
+  def fromOld(oldSplit: OldSplit, categoricalFeatures: Map[Int, Int]): SparkSplit = {
     oldSplit.featureType match {
       case OldFeatureType.Categorical =>
-        new CategoricalSplit(featureIndex = oldSplit.feature,
+        new SparkCategoricalSplit(featureIndex = oldSplit.feature,
           _leftCategories = oldSplit.categories.toArray, categoricalFeatures(oldSplit.feature))
       case OldFeatureType.Continuous =>
-        new ContinuousSplit(featureIndex = oldSplit.feature, threshold = oldSplit.threshold)
+        new SparkContinuousSplit(featureIndex = oldSplit.feature, threshold = oldSplit.threshold)
     }
   }
 }
@@ -159,6 +162,11 @@ final class CategoricalSplit private[ml] (
   private def setComplement(cats: Set[Double]): Set[Double] = {
     Range(0, numCategories).map(_.toDouble).filter(cat => !cats.contains(cat)).toSet
   }
+
+  /** convert to org.apache.ml.tree.Split **/
+  override def toSparkSplit: SparkSplit = {
+    new SparkCategoricalSplit(featureIndex, _leftCategories, numCategories)
+  }
 }
 
 /**
@@ -201,5 +209,10 @@ final class ContinuousSplit private[ml] (override val featureIndex: Int, val thr
 
   override private[tree] def toOld: OldSplit = {
     OldSplit(featureIndex, threshold, OldFeatureType.Continuous, List.empty[Double])
+  }
+
+  /** convert to org.apache.ml.tree.Split **/
+  override def toSparkSplit: SparkSplit = {
+    new SparkContinuousSplit(featureIndex, threshold)
   }
 }
