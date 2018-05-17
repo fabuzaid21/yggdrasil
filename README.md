@@ -21,7 +21,7 @@ libraryDependencies += "fabuzaid21" % "yggdrasil" % "1.0"
 Then use Yggdrasil as follows:
 
 ```scala
-import org.apache.spark.ml.tree.impl.Yggdrasil
+import org.apache.spark.ml.tree.impl.YggdrasilClassifier // YgddrasilRegressor
 
 // Identical to the Spark MLlib Decision Tree API
 val dt = new YggdrasilClassifier()
